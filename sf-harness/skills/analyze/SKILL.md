@@ -15,9 +15,7 @@ description: 프로세스 2단계. sf-signals 가 뽑은 사실 위에서 설비
 커맨드가 이미 `sf-signals` 출력을 붙여 놓았다. 없으면 직접 부른다:
 
 ```bash
-_SF="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/analyze/..}/bin/sf-signals"
-[ -x "$_SF" ] || _SF="$(command -v sf-signals)"
-"$_SF" <플랜트 경로> || echo "SF_SIGNALS: 없음 — 설치가 깨졌다"
+"${CLAUDE_PLUGIN_ROOT}/bin/sf-signals" <플랜트 경로>    # 경로를 생략하면 /tmp/sf-demo
 ```
 
 **스크립트를 못 찾으면 네가 직접 CSV 를 읽어 계산하지 마라.** 설치가 깨졌다고 알린다.

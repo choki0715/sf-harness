@@ -39,16 +39,20 @@ is_error() {  # is_error <설명> <출력>
 # ─── sf-demo-data ─────────────────────────────────────────────
 echo "sf-demo-data"
 OUT="$("$BIN/sf-demo-data" "$PLANT" --now "$NOW" 2>&1)"
-for f in config/thresholds.csv signals/CNC-02.csv maintenance_log.csv work_orders.csv decisions.csv state.json .sf-harness .claude/settings.json; do
+for f in config/thresholds.csv signals/CNC-02.csv maintenance_log.csv work_orders.csv decisions.csv state.json .sf-harness; do
   [ -f "$PLANT/$f" ] && ok "$f 생성" || bad "$f" "있음" "없음"
 done
-python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$PLANT/.claude/settings.json" 2>/dev/null \
-  && ok "settings.json 이 유효한 JSON" || bad "settings.json" "유효" "깨짐"
+[ -e "$PLANT/.claude" ] && bad "프로젝트 설정을 만들지 않는다" "없음" "있음" || ok "프로젝트 설정(.claude/)을 만들지 않는다 — 훅은 플러그인이 전역으로 건다"
 [ "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['clock'])" "$PLANT/state.json")" = "$NOW" ] \
   && ok "가상 시계가 --now 로 시작" || bad "clock" "$NOW" "다름"
 [ "$(tail -n +2 "$PLANT/signals/CNC-01.csv" | wc -l)" = 360 ] && ok "이력 120분 × 3센서 = 360행" || bad "이력" "360" "$(tail -n +2 "$PLANT/signals/CNC-01.csv" | wc -l)"
 OUT2="$("$BIN/sf-demo-data" "$PLANT" 2>&1)"
 case "$OUT2" in 이미\ 있다*) ok "이미 있으면 덮어쓰지 않는다" ;; *) bad "덮어쓰기 방지" "이미 있다" "$OUT2" ;; esac
+mkdir -p "$TMP/notplant"; O="$("$BIN/sf-demo-data" "$TMP/notplant" --fresh 2>&1)"
+case "$O" in ERROR:*) ok "--fresh 는 마커 없는 디렉터리를 지우지 않는다" ;; *) bad "--fresh 안전장치" "ERROR:" "$O" ;; esac
+"$BIN/sf-demo-data" "$PLANT" --now "$NOW" --fresh >/dev/null 2>&1 \
+  && [ "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['clock'])" "$PLANT/state.json")" = "$NOW" ] \
+  && ok "--fresh 로 실습 플랜트를 지우고 다시 만든다" || bad "--fresh" "재생성" "실패"
 # 결정성: 같은 --now 로 두 번 만들면 파일이 같다
 "$BIN/sf-demo-data" "$TMP/plant2" --now "$NOW" >/dev/null 2>&1
 diff -rq "$PLANT/signals" "$TMP/plant2/signals" >/dev/null && ok "같은 시작 시각이면 이력이 완전히 같다" || bad "결정성" "동일" "다름"
@@ -93,6 +97,15 @@ check    "ALERT_WARN"                     ALERT_WARN "CNC-02.temperature"
 contains "SENSOR_SUSPECT 에 FLATLINE"     SENSOR_SUSPECT "PRESS-01.pressure(FLATLINE)"
 contains "SENSOR_SUSPECT 에 MISSING"      SENSOR_SUSPECT "PRESS-01.cycle_time(MISSING)"
 check    "STALE_EQUIPMENT"                STALE_EQUIPMENT "CONV-01"
+# 플랜트 경로 자동 인식: 인자 → $SF_PLANT_DIR → 현재 → /tmp/sf-demo
+O="$(cd "$TMP" && SF_PLANT_DIR="$PLANT" "$BIN/sf-signals" 2>&1 | grep -m1 '^PLANT_DIR:')"
+[ "$O" = "PLANT_DIR: $PLANT" ] && ok "인자 없으면 \$SF_PLANT_DIR 의 플랜트를 쓴다 (어느 디렉터리에서든)" || bad "SF_PLANT_DIR" "$PLANT" "$O"
+O="$(cd "$PLANT" && "$BIN/sf-signals" 2>&1 | grep -m1 '^PLANT_DIR:')"
+[ "$O" = "PLANT_DIR: $PLANT" ] && ok "인자 없으면 현재 디렉터리가 플랜트면 그것을 쓴다" || bad "cwd plant" "$PLANT" "$O"
+O="$(cd "$TMP" && SF_PLANT_DIR="$PLANT" "$BIN/sf-actuate" list 2>&1 | grep -m1 '^SF_ACTUATE_OK$')"
+[ "$O" = "SF_ACTUATE_OK" ] && ok "sf-actuate 도 같은 규칙" || bad "actuate resolve" "OK" "$O"
+is_error "인자로 준 경로가 플랜트가 아니면 ERROR (조용히 다른 곳으로 가지 않는다)" "$(SF_PLANT_DIR="$PLANT" "$BIN/sf-signals" "$TMP" 2>&1)"
+
 # --now 를 주면 가상 시계보다 우선한다
 O="$("$BIN/sf-signals" "$PLANT" --now 2026-09-16T13:30:00 2>&1 | grep -m1 '^NOW_SOURCE:')"
 [ "$O" = "NOW_SOURCE: --now" ] && ok "--now 가 가상 시계보다 우선" || bad "--now 우선" "--now" "$O"
@@ -266,12 +279,23 @@ out="$(echo 'not json' | python3 "$GUARD")"
 out="$(python3 -c 'import json; print(json.dumps({"tool_name":"Bash","tool_input":{"command":"sf-actuate approve DEC-0001"}}))' | python3 "$GUARD")"
 echo "$out" | grep -q "운영자" && ok "차단 사유에 '누가 결정하는지'가 있다" || bad "사유" "운영자 언급" "$out"
 
-# 범위 밖에서는 아무것도 하지 않는다 (실무 저장소를 막지 않기 위해)
+# 플랜트 밖에서 Claude 를 띄웠을 때 — 어느 디렉터리에서든 실습이 되어야 한다
 cd "$TMP"
-g "마커 없으면 approve 도 통과"       PASS "sf-actuate approve DEC-0001"
-g "마커 없으면 rm signals 도 통과"    PASS "rm -rf signals"
-SF_HARNESS_GUARD=1 g "환경변수로 켜면 다시 막힌다" DENY "sf-actuate stop CNC-02 --reason x"
+echo
+echo "guard.py  (플랜트 밖 디렉터리 = 실무 저장소일 수도 있다)"
+g "우리 명령(approve)은 어디서든 막는다"   DENY "sf-actuate approve DEC-0001"
+g "우리 명령(stop)은 어디서든 막는다"      DENY "sf-actuate --plant $PLANT stop CNC-02 --reason x"
+g "명령에 적힌 절대 경로로 범위를 안다"     DENY "rm $PLANT/signals/CNC-02.csv"
+g "플랜트 디렉터리 통째로도 안다"          DENY "rm -rf $PLANT/signals"
+g "절대 경로 thresholds.csv 수정"          DENY "sed -i 's/7.1/9/' $PLANT/config/thresholds.csv"
+g "절대 경로 덮어쓰기"                     DENY "cat x > $PLANT/config/thresholds.csv"
+g "마커 없는 곳의 signals 는 남의 파일 — 통과" PASS "rm -rf signals"
+g "마커 없는 곳의 thresholds.csv 도 통과"  PASS "sed -i 's/a/b/' config/thresholds.csv"
+g "마커 없는 절대 경로도 통과"             PASS "rm $TMP/empty/signals.csv"
+SF_HARNESS_GUARD=1 g "환경변수로 켜면 어디서든 막힌다" DENY "rm -rf signals"
 gf "cwd 밖이어도 플랜트 파일 편집은 막는다" DENY Write "$PLANT/config/thresholds.csv"
+mkdir -p "$TMP/other/config"; touch "$TMP/other/config/thresholds.csv"
+gf "마커 없는 곳의 thresholds.csv 편집은 통과" PASS Write "$TMP/other/config/thresholds.csv"
 out="$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","cwd":sys.argv[1],"tool_input":{"command":"rm signals/x.csv"}}))' "$PLANT" | python3 "$GUARD")"
 [ -n "$out" ] && ok "입력 JSON 의 cwd 로 범위를 판단한다" || bad "cwd 필드" "DENY" "PASS"
 

@@ -41,11 +41,24 @@ def die(msg: str) -> None:
 
 
 # ─── 파일 I/O ───────────────────────────────────────────────────
-def plant_dir(arg: str | None) -> str:
-    plant = os.path.abspath(arg or os.environ.get("SF_PLANT_DIR") or ".")
-    if not os.path.exists(os.path.join(plant, "config", "thresholds.csv")):
-        die(f"config/thresholds.csv 가 없다: {plant} 는 플랜트 데이터 디렉터리가 아니다")
-    return plant
+DEFAULT_PLANT = "/tmp/sf-demo"
+
+
+def is_plant(path: str | None) -> bool:
+    return bool(path) and os.path.exists(os.path.join(path, "config", "thresholds.csv"))
+
+
+def resolve_plant(arg: str | None) -> str:
+    """플랜트 디렉터리를 정한다. 인자 → $SF_PLANT_DIR → 현재 디렉터리 → /tmp/sf-demo 순.
+    어느 디렉터리에서 Claude 를 띄웠든 인자 없이 실습 플랜트를 찾게 하려는 것이다."""
+    if arg:
+        if not is_plant(arg):
+            die(f"config/thresholds.csv 가 없다: {os.path.abspath(arg)} 는 플랜트 데이터 디렉터리가 아니다")
+        return os.path.abspath(arg)
+    for cand in (os.environ.get("SF_PLANT_DIR"), ".", DEFAULT_PLANT):
+        if is_plant(cand):
+            return os.path.abspath(cand)
+    die(f"플랜트를 찾지 못했다. 경로를 주거나, $SF_PLANT_DIR 을 설정하거나, sf-demo-data 로 {DEFAULT_PLANT} 를 만든다")
 
 
 def known_equipment(plant: str) -> list[str]:
@@ -139,7 +152,7 @@ def envelope(action: str) -> None:
 # ─── 본체 ───────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser(description="설비 조치 제안·승인·실행")
-    ap.add_argument("--plant", help="플랜트 데이터 디렉터리 (기본: $SF_PLANT_DIR 또는 현재)")
+    ap.add_argument("--plant", help="플랜트 데이터 디렉터리 (기본: $SF_PLANT_DIR → 현재 → /tmp/sf-demo)")
     ap.add_argument("--now", help="기준 시각 (테스트용)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -179,7 +192,7 @@ def main() -> int:
     p.add_argument("--reason", required=True)
 
     args = ap.parse_args()
-    plant = plant_dir(args.plant)
+    plant = resolve_plant(args.plant)
     now = args.now or datetime.now().strftime(TS_FMT)
     dec_path = os.path.join(plant, "decisions.csv")
 

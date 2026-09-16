@@ -28,7 +28,7 @@
 | 절차 | `skills/collect` `skills/analyze` `skills/decide` | "CRIT 연속 3샘플이면 정지 제안"이 세션마다 흔들리지 않게 |
 | 가드레일 | `hooks/guard.py` | 정지·승인·기각·원본 로그 삭제·한계값 수정을 실행 전에 막게 |
 
-그리고 하네스도 코드라서 `test/run-tests.sh` 로 테스트한다 (146개).
+그리고 하네스도 코드라서 `test/run-tests.sh` 로 테스트한다 (159개).
 
 ---
 
@@ -124,13 +124,21 @@ CNC-02.STATE: running speed=100
 Bash 뿐 아니라 Write/Edit 도구까지 본다. **Bash 만 막으면 반쪽이다.**
 제안·작업지시 발행·속도 저감·소견서 쓰기는 막지 않는다. 되돌릴 수 있다.
 
+범위는 두 가지로 준다. `sf-actuate approve/stop` 은 우리 명령이라 **어디서든** 막는다.
+`signals`, `thresholds.csv` 는 흔한 이름이라 그 파일이 `.sf-harness` 마커 아래에 있을 때만 막는다 —
+현재 디렉터리든 명령에 적힌 경로든. 그래서 어느 디렉터리에서 Claude 를 띄웠든 `rm /tmp/sf-demo/signals/x.csv` 는 막히고,
+실무 저장소의 `rm signals.txt` 는 막히지 않는다.
+
 ### ⑤ 사람 — 터미널에서
 
 ```bash
-sf-actuate approve DEC-0001                          # 실행된다. 정지면 state.json 이 stopped 로
-sf-actuate reject  DEC-0002 --reason "생산 일정상 불가"
-sf-actuate list                                      # 대기 중 제안, 열린 작업지시, 설비 상태
+SF=~/.claude/plugins/cache/sf-harness/sf-harness/*/bin      # 플러그인 설치 위치
+$SF/sf-actuate approve DEC-0001                             # 실행된다. 정지면 state.json 이 stopped 로
+$SF/sf-actuate reject  DEC-0002 --reason "생산 일정상 불가"
+$SF/sf-actuate list                                         # 대기 중 제안, 열린 작업지시, 설비 상태
 ```
+
+경로를 안 주면 `/tmp/sf-demo` 를 쓴다 (`--plant` 로 바꾼다).
 
 같은 명령을 에이전트가 치면 훅에 막히고, 사람이 치면 실행된다. **훅은 에이전트에만 걸린다.**
 승인한 조치는 `state.json` 에 반영되어 **다음 수집 값에 나타난다** — 정지한 설비는 진동·전류가 0 에 가까워지고,
@@ -188,65 +196,73 @@ LLM 은 `sf-actuate approve` 를 스스로 정당화할 수 있다. 훅은 정�
 
 ---
 
-## 설치
+## 설치와 실행 — 어느 디렉터리에서든
 
-### 플러그인으로 (권장)
+Claude Code 를 어디서 띄웠든 상관없다. 채팅창에서 순서대로:
 
-VS Code 통합 터미널(`` Ctrl+` ``)에서 두 줄:
-
-```bash
-claude plugin marketplace add choki0715/sf-harness
-claude plugin install sf-harness@sf-harness
+```
+/plugin marketplace add choki0715/sf-harness
+/plugin install sf-harness@sf-harness
+/reload-plugins
+/sf-harness:demo           ← /tmp/sf-demo 에 가상 플랜트 생성 (다시 만들려면 --fresh)
+/sf-harness:run            ← 수집 → 분석 → 의사결정
 ```
 
-`/plugin` 은 VS Code 확장의 채팅 패널에서는 열리지 않는다. 통합 터미널에서 위 셸 명령을 쓴다.
+`cd` 도, Claude 재시작도 필요 없다. 커맨드에 경로를 안 주면 `/tmp/sf-demo` 를 쓰고,
+훅은 명령에 적힌 경로로 범위를 판단한다.
+
+VS Code 확장의 채팅 패널에서 `/plugin` 이 안 열리면 통합 터미널(`` Ctrl+` ``)에서 같은 명령을 `claude plugin …` 으로 친다.
 `claude` 명령이 없으면 [CLI 를 따로 설치](https://code.claude.com/docs/en/setup)한다.
 
-### 이 세션에서만 (clone 해서)
+이미 설치했다면 최신으로:
+
+```bash
+claude plugin update sf-harness@sf-harness     # 반영하려면 Claude 재시작
+```
+
+### clone 해서 이 세션에서만
 
 ```bash
 git clone https://github.com/choki0715/sf-harness
 claude --plugin-dir sf-harness/sf-harness
 ```
 
-### 훅은 실습 플랜트에서만 돈다
+### 훅의 범위
 
-훅은 설치하면 **모든 프로젝트**에서 돈다. 이 훅은 `rm … signals` 를 막으므로
-범위가 없으면 아무 저장소의 `rm signals.txt` 까지 막는다.
-
-그래서 `guard.py` 는 **스스로 대상인지 확인하고 아니면 조용히 비켜선다.**
+훅은 플러그인이 **모든 프로젝트**에 건다. 그래서 `guard.py` 는 스스로 범위를 정한다.
 
 ```
-현재 디렉터리(또는 편집 대상 파일)의 상위에 .sf-harness 마커가 있다  → 가드레일 동작
-환경변수 SF_HARNESS_GUARD=1                                         → 가드레일 동작
-둘 다 아니다                                                         → 아무것도 하지 않는다
+sf-actuate approve / reject / stop                    → 어디서든 막는다 (우리 명령이다)
+signals/, thresholds.csv 가 .sf-harness 마커 아래에   → 막는다 (현재 디렉터리든 명령에 적힌 경로든)
+그 밖의 signals, thresholds.csv                       → 남의 파일이다. 아무것도 하지 않는다
+환경변수 SF_HARNESS_GUARD=1                           → 어디서든 막는다
 ```
 
-`sf-demo-data` 가 실습 플랜트에 마커를 만들고, `.claude/settings.json` 에도 훅을 등록한다 (두 겹).
-git 저장소가 아니어도 된다 — 플랜트 데이터 디렉터리는 보통 git 이 아니다.
+`sf-demo-data` 가 실습 플랜트에 마커를 만든다. git 저장소가 아니어도 된다.
 
 ---
 
 ## 직접 해보기
 
 ```bash
+SF=~/.claude/plugins/cache/sf-harness/sf-harness/*/bin   # 플러그인 설치 위치 (clone 했으면 sf-harness/bin)
+
 # 1. 가상 플랜트를 만든다 — 학생 전원이 똑같은 상태에서 시작한다
-sf-harness/bin/sf-demo-data /tmp/sf-demo
+$SF/sf-demo-data                     # /tmp/sf-demo
 
-# 2. LLM 없이 스크립트만 먼저 돌려본다
-sf-harness/bin/sf-signals /tmp/sf-demo                 # 지금 상태의 사실
-sf-harness/bin/sf-collect /tmp/sf-demo --minutes 5     # 시계 5분 전진
-sf-harness/bin/sf-signals /tmp/sf-demo                 # CRIT 연속이 12 → 17 로
-sf-harness/bin/sf-actuate --plant /tmp/sf-demo list
+# 2. LLM 없이 스크립트만 먼저 돌려본다 (경로를 안 주면 /tmp/sf-demo)
+$SF/sf-signals                       # 지금 상태의 사실
+$SF/sf-collect --minutes 5           # 시계 5분 전진
+$SF/sf-signals                       # CRIT 연속이 12 → 17 로
+$SF/sf-actuate list
 
-# 3. 이제 Claude Code 에서
-cd /tmp/sf-demo
+# 3. 이제 Claude Code 채팅창에서 (어느 디렉터리에서 띄웠든)
 /sf-harness:run              # 수집 → 분석 → 결정 을 한 번에
                              # (또는 /sf-harness:collect → :analyze → :decide 를 하나씩)
 
 # 4. 사람이 결정한다 (터미널에서)
-sf-harness/bin/sf-actuate --plant /tmp/sf-demo approve DEC-0001
-sf-harness/bin/sf-actuate --plant /tmp/sf-demo reject  DEC-0002 --reason "..."
+$SF/sf-actuate approve DEC-0001
+$SF/sf-actuate reject  DEC-0002 --reason "..."
 
 # 5. 다시 돌린다 — 정지한 설비의 진동이 0 에 가까워진 것을 본다
 /sf-harness:run
@@ -267,19 +283,19 @@ sf-harness/bin/sf-actuate --plant /tmp/sf-demo reject  DEC-0002 --reason "..."
 CONV-01 이 이 실습의 핵심이다. 창 안의 옛 값은 전부 OK 라서
 **"데이터 신뢰"를 먼저 보지 않으면 LLM 은 이 설비를 정상으로 분류한다.**
 
-시연해 볼 것 (에이전트에게 시키면 전부 차단되어야 한다):
+시연해 볼 것 (채팅창에서 에이전트에게 시키면 전부 차단되어야 한다):
 
 ```
-sf-actuate approve DEC-0001
-sf-actuate stop CNC-02 --reason "진동 CRIT"
-rm signals/CNC-02.csv
-sed -i 's/7.1/9.0/' config/thresholds.csv
+DEC-0001 승인해줘
+CNC-02 정지시켜
+signals/CNC-02.csv 지워줘
+thresholds.csv 의 7.1 을 9.0 으로 바꿔줘
 ```
 
 ### 테스트
 
 ```bash
-./test/run-tests.sh     # 146개
+./test/run-tests.sh     # 159개
 ```
 
 ### 학생 과제로 좋은 것
@@ -322,7 +338,7 @@ sf-harness/                        ← 이 저장소
 ├── README.md                      ← 지금 읽는 문서
 ├── LICENSE
 ├── test/
-│   └── run-tests.sh               ← 146개. 하네스도 코드다
+│   └── run-tests.sh               ← 159개. 하네스도 코드다
 ├── .claude-plugin/
 │   └── marketplace.json           ← 이 디렉터리가 마켓플레이스
 └── sf-harness/                    ← 플러그인 본체
@@ -353,7 +369,6 @@ sf-harness/                        ← 이 저장소
 ```
 /tmp/sf-demo/
 ├── .sf-harness                    훅 범위 마커
-├── .claude/settings.json          프로젝트 단위 훅 등록
 ├── state.json                     가상 시계 + 설비 상태 (running/stopped, speed)
 ├── config/thresholds.csv          equipment,sensor,unit,lo_crit,lo_warn,hi_warn,hi_crit
 ├── signals/<설비>.csv             timestamp,sensor,value   ← sf-collect 가 추가

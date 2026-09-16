@@ -13,8 +13,8 @@ description: 프로세스 3단계. 분석 소견(reports/analysis.md)과 최신 
 커맨드가 세 가지를 붙여 놓았다. 없으면 직접 부른다:
 
 ```bash
-_B="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/decide/..}/bin"
-"$_B/sf-signals" <플랜트 경로>                   # 최신 사실
+_B="${CLAUDE_PLUGIN_ROOT}/bin"
+"$_B/sf-signals" <플랜트 경로>                   # 최신 사실 (경로를 생략하면 /tmp/sf-demo)
 "$_B/sf-actuate" --plant <플랜트 경로> list       # 대기 중 제안, 열린 작업지시, 설비 상태
 cat <플랜트 경로>/reports/analysis.md             # analyze 단계의 소견
 ```
@@ -48,9 +48,9 @@ cat <플랜트 경로>/reports/analysis.md             # analyze 단계의 소�
 ## 3. 제안을 기록한다
 
 ```bash
-sf-actuate --plant <경로> propose CNC-02 stop --reason "vibration 8.45 (crit 7.1) CRIT_STREAK 12, temperature 76.11 (warn 70) 동반 상승. 베어링·윤활 계통 추정"
-sf-actuate --plant <경로> propose CNC-01 schedule-maintenance --when next-shift --reason "temperature 65.86, +4.05/h, 이 속도면 61분 뒤 warn 70. 정비 45일 경과"
-sf-actuate --plant <경로> propose CNC-01 recheck --reason "current OVER_CRIT 1, CRIT_STREAK 0 — 일시 스파이크. 반복되면 점검"
+"${CLAUDE_PLUGIN_ROOT}/bin/sf-actuate" --plant <경로> propose CNC-02 stop --reason "vibration 8.45 (crit 7.1) CRIT_STREAK 12, temperature 76.11 (warn 70) 동반 상승. 베어링·윤활 계통 추정"
+"${CLAUDE_PLUGIN_ROOT}/bin/sf-actuate" --plant <경로> propose CNC-01 schedule-maintenance --when next-shift --reason "temperature 65.86, +4.05/h, 이 속도면 61분 뒤 warn 70. 정비 45일 경과"
+"${CLAUDE_PLUGIN_ROOT}/bin/sf-actuate" --plant <경로> propose CNC-01 recheck --reason "current OVER_CRIT 1, CRIT_STREAK 0 — 일시 스파이크. 반복되면 점검"
 ```
 
 `--reason` 에는 **센서·값·한계·추세** 를 넣는다. 6개월 뒤 "왜 이 제안을 했지?"에 답할 수 있어야 한다.

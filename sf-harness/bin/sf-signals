@@ -43,6 +43,26 @@ def die(msg: str) -> None:
     raise SystemExit(1)
 
 
+DEFAULT_PLANT = "/tmp/sf-demo"
+
+
+def is_plant(path: str | None) -> bool:
+    return bool(path) and os.path.exists(os.path.join(path, "config", "thresholds.csv"))
+
+
+def resolve_plant(arg: str | None) -> str:
+    """플랜트 디렉터리를 정한다. 인자 → $SF_PLANT_DIR → 현재 디렉터리 → /tmp/sf-demo 순.
+    어느 디렉터리에서 Claude 를 띄웠든 인자 없이 실습 플랜트를 찾게 하려는 것이다."""
+    if arg:
+        if not is_plant(arg):
+            die(f"config/thresholds.csv 가 없다: {os.path.abspath(arg)} 는 플랜트 데이터 디렉터리가 아니다")
+        return os.path.abspath(arg)
+    for cand in (os.environ.get("SF_PLANT_DIR"), ".", DEFAULT_PLANT):
+        if is_plant(cand):
+            return os.path.abspath(cand)
+    die(f"플랜트를 찾지 못했다. 경로를 주거나, $SF_PLANT_DIR 을 설정하거나, sf-demo-data 로 {DEFAULT_PLANT} 를 만든다")
+
+
 def fnum(x: float) -> str:
     return f"{x:.2f}"
 
@@ -215,19 +235,15 @@ def limits_str(th: dict) -> str:
 # ─── 본체 ───────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser(description="설비 센서 신호를 사실로 뽑는다")
-    ap.add_argument("plant", nargs="?", default=".", help="플랜트 데이터 디렉터리 (기본: 현재)")
+    ap.add_argument("plant", nargs="?", help="플랜트 데이터 디렉터리 (기본: $SF_PLANT_DIR → 현재 → /tmp/sf-demo)")
     ap.add_argument("--window", type=int, default=60, help="분석 창(분). 기본 60")
     ap.add_argument("--now", help="기준 시각 YYYY-MM-DDTHH:MM:SS (기본: state.json 의 가상 시계, 없으면 현재 시각)")
     ap.add_argument("--stale-min", type=int, default=10, help="이 분 이상 새 샘플이 없으면 STALE 로 센다")
     ap.add_argument("--flat-n", type=int, default=15, help="마지막 N 샘플이 완전히 같으면 FLATLINE 으로 센다")
     args = ap.parse_args()
 
-    plant = os.path.abspath(args.plant or ".")
-    if not os.path.isdir(plant):
-        die(f"그런 경로가 없다: {plant}")
+    plant = resolve_plant(args.plant)
     thr_path = os.path.join(plant, "config", "thresholds.csv")
-    if not os.path.exists(thr_path):
-        die(f"config/thresholds.csv 가 없다: {plant} 는 플랜트 데이터 디렉터리가 아니다")
     sig_dir = os.path.join(plant, "signals")
     if not os.path.isdir(sig_dir):
         die(f"signals/ 디렉터리가 없다: {plant}")

@@ -12,12 +12,10 @@ description: 프로세스 1단계. 가상 센서에서 새 값을 수집한 결�
 
 ## 0. 사실을 받는다
 
-커맨드가 이미 `sf-collect` 출력을 붙여 놓았다. 없으면 직접 부른다:
+커맨드가 이미 `sf-collect` 출력을 붙여 놓았다. 없으면 직접 부른다 (`${CLAUDE_PLUGIN_ROOT}` 는 플러그인 루트다):
 
 ```bash
-_SF="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/collect/..}/bin/sf-collect"
-[ -x "$_SF" ] || _SF="$(command -v sf-collect)"
-"$_SF" <플랜트 경로> --minutes 5 || echo "SF_COLLECT: 없음 — 설치가 깨졌다"
+"${CLAUDE_PLUGIN_ROOT}/bin/sf-collect" <플랜트 경로> --minutes 5    # 경로를 생략하면 /tmp/sf-demo
 ```
 
 확인할 것:

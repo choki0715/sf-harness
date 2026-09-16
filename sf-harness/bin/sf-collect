@@ -6,7 +6,7 @@
 "몇 개를 받았고, 어느 설비가 조용했는가"까지만 사실로 출력한다.
 
 사용법:
-  sf-collect [플랜트 경로] [--minutes N]     기본 5분
+  sf-collect [플랜트 경로] [--minutes N]     기본 5분. 경로가 없으면 $SF_PLANT_DIR → 현재 → /tmp/sf-demo
 
 출력 형식: `KEY: value` (다른 스크립트와 같다). 마지막 줄 SF_COLLECT_OK.
 """
@@ -28,13 +28,33 @@ def die(msg: str) -> None:
     raise SystemExit(1)
 
 
+DEFAULT_PLANT = "/tmp/sf-demo"
+
+
+def is_plant(path: str | None) -> bool:
+    return bool(path) and os.path.exists(os.path.join(path, "config", "thresholds.csv"))
+
+
+def resolve_plant(arg: str | None) -> str:
+    """플랜트 디렉터리를 정한다. 인자 → $SF_PLANT_DIR → 현재 디렉터리 → /tmp/sf-demo 순.
+    어느 디렉터리에서 Claude 를 띄웠든 인자 없이 실습 플랜트를 찾게 하려는 것이다."""
+    if arg:
+        if not is_plant(arg):
+            die(f"config/thresholds.csv 가 없다: {os.path.abspath(arg)} 는 플랜트 데이터 디렉터리가 아니다")
+        return os.path.abspath(arg)
+    for cand in (os.environ.get("SF_PLANT_DIR"), ".", DEFAULT_PLANT):
+        if is_plant(cand):
+            return os.path.abspath(cand)
+    die(f"플랜트를 찾지 못했다. 경로를 주거나, $SF_PLANT_DIR 을 설정하거나, sf-demo-data 로 {DEFAULT_PLANT} 를 만든다")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="가상 센서 데이터 수집")
-    ap.add_argument("plant", nargs="?", default=".")
+    ap.add_argument("plant", nargs="?", help="플랜트 데이터 디렉터리 (기본: $SF_PLANT_DIR → 현재 → /tmp/sf-demo)")
     ap.add_argument("--minutes", type=int, default=5, help="가상 시계를 몇 분 전진시키며 수집할지 (기본 5)")
     args = ap.parse_args()
 
-    plant = os.path.abspath(args.plant or ".")
+    plant = resolve_plant(args.plant)
     state = vp.load_state(plant)
     if state is None:
         die(f"state.json 이 없다: {plant} 는 가상 플랜트가 아니다 (sf-demo-data 로 만든다)")

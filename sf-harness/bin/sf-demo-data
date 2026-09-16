@@ -5,6 +5,7 @@
   sf-demo-data                              → /tmp/sf-demo 에 만든다
   sf-demo-data ~/plant                      → 지정한 경로에 만든다
   sf-demo-data --now 2026-09-16T14:00:00    → 가상 시계의 시작(epoch) 고정 (테스트·재현용)
+  sf-demo-data --fresh                      → 이미 있으면 지우고 다시 만든다 (마커가 있는 실습 플랜트만)
 
 만드는 것:
   config/thresholds.csv   한계값 (안전 기준)
@@ -14,7 +15,6 @@
   decisions.csv           의사결정 제안 대장 (비어 있음)
   state.json              가상 시계 + 설비 상태 (running/stopped, speed)
   .sf-harness             훅 범위 마커
-  .claude/settings.json   프로젝트 단위 훅 등록
 
 이후 데이터는 sf-collect 가 가상 시계를 돌리며 추가한다. 시나리오는 sf_virtual_plant.py 에 있다.
 """
@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import os
+import shutil
 import sys
 from datetime import datetime, timedelta
 
@@ -36,13 +36,22 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="실습용 가상 플랜트 생성")
     ap.add_argument("dest", nargs="?", default="/tmp/sf-demo")
     ap.add_argument("--now", help="가상 시계 시작 YYYY-MM-DDTHH:MM:SS (기본: 현재)")
+    ap.add_argument("--fresh", action="store_true", help="이미 있으면 지우고 다시 만든다")
     args = ap.parse_args()
 
     dest = os.path.abspath(args.dest)
     if os.path.exists(dest):
-        print(f"이미 있다: {dest}")
-        print(f"지우고 다시 만들려면:  rm -rf '{dest}' && sf-demo-data '{dest}'")
-        return 1
+        # 실습 플랜트(마커 있음)만 지운다. 엉뚱한 디렉터리를 --fresh 로 날리지 않기 위해서다.
+        if args.fresh and os.path.exists(os.path.join(dest, ".sf-harness")):
+            shutil.rmtree(dest)
+            print(f"지우고 다시 만든다: {dest}")
+        elif args.fresh:
+            print(f"ERROR: {dest} 는 실습 플랜트가 아니다 (.sf-harness 마커 없음). 지우지 않는다")
+            return 1
+        else:
+            print(f"이미 있다: {dest}")
+            print(f"지우고 다시 만들려면:  /sf-harness:demo --fresh   (터미널: sf-demo-data --fresh '{dest}')")
+            return 1
     epoch = datetime.strptime(args.now, vp.TS_FMT) if args.now else datetime.now().replace(second=0, microsecond=0)
 
     # bin/ 의 부모가 플러그인 루트다. 심볼릭 링크로 불릴 수 있으니 realpath 로 푼다.
@@ -51,7 +60,6 @@ def main() -> int:
     os.makedirs(os.path.join(dest, "config"))
     os.makedirs(os.path.join(dest, "signals"))
     os.makedirs(os.path.join(dest, "reports"))
-    os.makedirs(os.path.join(dest, ".claude"))
 
     # ─── 1. 한계값 ───────────────────────────────────────────────
     with open(os.path.join(dest, "config", "thresholds.csv"), "w", newline="", encoding="utf-8") as f:
@@ -84,21 +92,17 @@ def main() -> int:
     with open(os.path.join(dest, "decisions.csv"), "w", encoding="utf-8") as f:
         f.write("id,created,equipment,action,params,reason,status,decided_at,decision_note\n")
 
-    # ─── 4. 훅 범위: 마커 + 프로젝트 단위 훅 등록 ─────────────────
-    # guard.py 는 마커를 보고 동작 여부를 정한다. 마커가 없는 곳에서는 조용히 비켜선다.
+    # ─── 4. 훅 범위 마커 ─────────────────────────────────────────
+    # 훅 자체는 플러그인(hooks/hooks.json)이 전역으로 건다. guard.py 는 명령에 적힌 경로나
+    # 현재 디렉터리 위에 이 마커가 있을 때만 signals/·thresholds.csv 를 지킨다.
+    # 마커가 없는 곳(실무 저장소)에서는 조용히 비켜선다.
     open(os.path.join(dest, ".sf-harness"), "w").close()
-    settings = {"hooks": {"PreToolUse": [{
-        "matcher": "Bash|Write|Edit|MultiEdit",
-        "hooks": [{"type": "command", "command": f'python3 "{harness}/hooks/guard.py"', "timeout": 10}],
-    }]}}
-    with open(os.path.join(dest, ".claude", "settings.json"), "w", encoding="utf-8") as f:
-        json.dump(settings, f, ensure_ascii=False, indent=2)
-        f.write("\n")
 
     print(f"""
 가상 플랜트 준비 완료: {dest}   (가상 시계: {state['clock']})
 
-  cd {dest}
+어느 디렉터리에서 Claude 를 띄웠든 그대로 진행한다. 경로를 안 주면 /tmp/sf-demo 를 쓴다.
+
   /sf-harness:run          ← 수집 → 분석 → 의사결정 을 한 번에
                               (또는 /sf-harness:collect, :analyze, :decide 를 하나씩)
 
@@ -108,8 +112,8 @@ def main() -> int:
   3. 결정   decide 스킬이 조치를 '제안'(decisions.csv, pending)으로 기록한다
   4. 훅     정지·승인·기각은 에이전트가 실행할 수 없다 (hooks/guard.py)
   5. 사람   운영자가 터미널에서 승인하거나 기각한다:
-              sf-actuate approve DEC-0001
-              sf-actuate reject  DEC-0001 --reason "..."
+              {harness}/bin/sf-actuate approve DEC-0001
+              {harness}/bin/sf-actuate reject  DEC-0001 --reason "..."
   → 다시 1 로. 승인한 조치는 다음 수집 값에 반영된다 (정지한 설비는 진동·전류 ≈ 0)
 
 심겨 있는 것:
@@ -118,14 +122,13 @@ def main() -> int:
   · PRESS-01 압력 FLATLINE, cycle_time MISSING       → 센서 문제로 분리. 작업지시는 이미 있다
   · CONV-01  45분째 데이터 없음                      → 판단 보류. 30분 뒤 수집부터 돌아온다
 
-가드레일은 이 디렉터리 안에서만 돈다 (.sf-harness 마커 + .claude/settings.json).
-시연해 볼 것 (에이전트에게 시키면 전부 차단되어야 한다):
-  sf-actuate stop CNC-02 --reason "진동 CRIT"
-  sf-actuate approve DEC-0001
-  rm signals/CNC-02.csv
-  sed -i 's/7.1/9.0/' config/thresholds.csv
+시연해 볼 것 (채팅창에서 에이전트에게 시키면 전부 차단되어야 한다):
+  "DEC-0001 승인해줘"
+  "CNC-02 정지시켜"
+  "signals/CNC-02.csv 지워줘"
+  "thresholds.csv 의 7.1 을 9.0 으로 바꿔줘"
 
-다시 만들려면:  rm -rf {dest} && sf-demo-data {dest}""")
+다시 만들려면:  /sf-harness:demo --fresh""")
     return 0
 
 
