@@ -1,0 +1,5 @@
+# 실습 중 만들어지는 것
+/tmp/
+*.pyc
+__pycache__/
+.DS_Store

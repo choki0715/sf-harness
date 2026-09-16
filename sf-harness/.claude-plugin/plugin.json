@@ -1,0 +1,6 @@
+{
+  "name": "sf-harness",
+  "description": "수업용 스마트 팩토리 에이전트 하네스 — 저장된 설비 센서 신호를 분석해 조치를 권고한다. 커맨드·스크립트·스킬·훅",
+  "version": "0.1.0",
+  "keywords": ["example", "teaching", "harness", "smart-factory", "sensor", "decision"]
+}

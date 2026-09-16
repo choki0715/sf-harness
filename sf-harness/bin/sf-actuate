@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""sf-actuate — 설비에 대한 '조치'를 기록·실행한다 (실습에서는 파일에 기록한다).
+
+수업 포인트: 조치에는 되돌릴 수 있는 것과 없는 것이 있다.
+
+  되돌릴 수 있다  schedule-maintenance  작업지시 발행 → cancel 로 취소된다
+                  set-speed             속도 저감 → 다시 100 으로 올리면 된다
+                  cancel                작업지시 취소
+  되돌릴 수 없다  stop                  설비 정지 → 가공 중인 제품은 폐기, 재가동은 수십 분
+
+  되돌릴 수 있는 조치는 스킬의 판단에 맡긴다.
+  되돌릴 수 없는 조치(stop)는 hooks/guard.py 가 에이전트의 실행을 막는다.
+  같은 명령을 사람이 터미널에서 치면 실행된다 — 훅은 에이전트에만 걸린다.
+
+모든 조치는 --reason 이 필수다. 근거 없는 조치는 기록하지 않는다.
+6개월 뒤 "왜 이 설비를 세웠지?"에 답할 수 있어야 한다.
+
+출력 형식: `KEY: value` (sf-signals 와 같다).
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+from datetime import datetime
+
+PROTO = 1
+TS_FMT = "%Y-%m-%dT%H:%M:%S"
+WO_FIELDS = ["id", "created", "equipment", "action", "when", "reason", "status"]
+
+
+def die(msg: str) -> None:
+    print(f"ERROR: {msg}")
+    raise SystemExit(1)
+
+
+def plant_dir(arg: str | None) -> str:
+    plant = os.path.abspath(arg or os.environ.get("SF_PLANT_DIR") or ".")
+    if not os.path.exists(os.path.join(plant, "config", "thresholds.csv")):
+        die(f"config/thresholds.csv 가 없다: {plant} 는 플랜트 데이터 디렉터리가 아니다")
+    return plant
+
+
+def known_equipment(plant: str) -> list[str]:
+    seen: list[str] = []
+    with open(os.path.join(plant, "config", "thresholds.csv"), newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            eq = (row.get("equipment") or "").strip()
+            if eq and eq not in seen:
+                seen.append(eq)
+    return seen
+
+
+def require_equipment(plant: str, eq: str) -> None:
+    eqs = known_equipment(plant)
+    if eq not in eqs:
+        die(f"모르는 설비다: {eq}  (등록된 설비: {' '.join(eqs)})")
+
+
+def read_work_orders(plant: str) -> list[dict]:
+    path = os.path.join(plant, "work_orders.csv")
+    if not os.path.exists(path):
+        return []
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def write_work_orders(plant: str, rows: list[dict]) -> None:
+    with open(os.path.join(plant, "work_orders.csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=WO_FIELDS, lineterminator="\n")
+        w.writeheader()
+        w.writerows(rows)
+
+
+def log_action(plant: str, now: str, action: str, eq: str, detail: str, reason: str) -> None:
+    """actions.log 는 추가만 한다. 지우지 않는다 — 조치 이력도 증거다."""
+    with open(os.path.join(plant, "actions.log"), "a", encoding="utf-8") as f:
+        f.write(f"{now}\t{action}\t{eq}\t{detail}\t{reason}\n")
+
+
+def envelope_start(action: str) -> None:
+    print(f"SF_ACTUATE_PROTO: {PROTO}")
+    print(f"ACTION: {action}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="설비 조치 기록·실행")
+    ap.add_argument("--plant", help="플랜트 데이터 디렉터리 (기본: $SF_PLANT_DIR 또는 현재)")
+    ap.add_argument("--now", help="기준 시각 (테스트용)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", help="열린 작업지시 목록")
+
+    p = sub.add_parser("schedule-maintenance", help="점검·정비 작업지시 발행 (되돌릴 수 있다)")
+    p.add_argument("equipment")
+    p.add_argument("--when", required=True, help="YYYY-MM-DD 또는 next-shift")
+    p.add_argument("--reason", required=True)
+
+    p = sub.add_parser("set-speed", help="가동 속도 저감 %% (되돌릴 수 있다)")
+    p.add_argument("equipment")
+    p.add_argument("percent", type=int)
+    p.add_argument("--reason", required=True)
+
+    p = sub.add_parser("cancel", help="작업지시 취소")
+    p.add_argument("work_order")
+    p.add_argument("--reason", required=True)
+
+    p = sub.add_parser("stop", help="설비 정지 (되돌릴 수 없다 — 사람이 실행한다)")
+    p.add_argument("equipment")
+    p.add_argument("--reason", required=True)
+
+    args = ap.parse_args()
+    plant = plant_dir(args.plant)
+    now = args.now or datetime.now().strftime(TS_FMT)
+
+    if args.cmd == "list":
+        envelope_start("list")
+        rows = [r for r in read_work_orders(plant) if r.get("status") == "open"]
+        print(f"OPEN_WORK_ORDERS: {len(rows)}")
+        for r in rows:
+            print(f"  {r['id']} {r['equipment']} {r['action']} when={r['when']} reason={r['reason']}")
+        print("SF_ACTUATE_OK")
+        return 0
+
+    reason = (args.reason or "").strip()
+    if not reason:
+        die("--reason 이 비어 있다. 근거 없는 조치는 기록하지 않는다")
+
+    if args.cmd == "schedule-maintenance":
+        require_equipment(plant, args.equipment)
+        if args.when != "next-shift":
+            try:
+                datetime.strptime(args.when, "%Y-%m-%d")
+            except ValueError:
+                die(f"--when 형식이 틀렸다 (YYYY-MM-DD 또는 next-shift): {args.when}")
+        rows = read_work_orders(plant)
+        max_id = max((int(r["id"].split("-")[1]) for r in rows if r.get("id", "").startswith("WO-")), default=0)
+        wo = {"id": f"WO-{max_id + 1:04d}", "created": now, "equipment": args.equipment,
+              "action": "schedule-maintenance", "when": args.when, "reason": reason, "status": "open"}
+        rows.append(wo)
+        write_work_orders(plant, rows)
+        log_action(plant, now, "schedule-maintenance", args.equipment, f"when={args.when} {wo['id']}", reason)
+        envelope_start("schedule-maintenance")
+        print(f"EQUIPMENT: {args.equipment}")
+        print(f"WORK_ORDER: {wo['id']}")
+        print(f"WHEN: {args.when}")
+        print(f"REVERSIBLE: yes  (sf-actuate cancel {wo['id']} --reason ...)")
+        print("SF_ACTUATE_OK")
+        return 0
+
+    if args.cmd == "cancel":
+        rows = read_work_orders(plant)
+        hit = [r for r in rows if r.get("id") == args.work_order]
+        if not hit:
+            die(f"그런 작업지시가 없다: {args.work_order}")
+        if hit[0]["status"] != "open":
+            die(f"{args.work_order} 는 이미 {hit[0]['status']} 상태다")
+        hit[0]["status"] = "cancelled"
+        write_work_orders(plant, rows)
+        log_action(plant, now, "cancel", hit[0]["equipment"], args.work_order, reason)
+        envelope_start("cancel")
+        print(f"WORK_ORDER: {args.work_order}")
+        print("STATUS: cancelled")
+        print("SF_ACTUATE_OK")
+        return 0
+
+    if args.cmd == "set-speed":
+        require_equipment(plant, args.equipment)
+        if not 50 <= args.percent <= 100:
+            die(f"속도는 50~100% 사이여야 한다: {args.percent}  (그 이하는 정지와 같다 — stop 을 쓰고 사람이 실행한다)")
+        log_action(plant, now, "set-speed", args.equipment, f"percent={args.percent}", reason)
+        envelope_start("set-speed")
+        print(f"EQUIPMENT: {args.equipment}")
+        print(f"PERCENT: {args.percent}")
+        print("REVERSIBLE: yes  (sf-actuate set-speed <설비> 100 --reason ...)")
+        print("SF_ACTUATE_OK")
+        return 0
+
+    if args.cmd == "stop":
+        require_equipment(plant, args.equipment)
+        log_action(plant, now, "stop", args.equipment, "", reason)
+        envelope_start("stop")
+        print(f"EQUIPMENT: {args.equipment}")
+        print("REVERSIBLE: no  (재가동은 현장 승인 후 별도 절차)")
+        print("SF_ACTUATE_OK")
+        return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

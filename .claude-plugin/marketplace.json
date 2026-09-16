@@ -1,0 +1,13 @@
+{
+  "name": "sf-harness",
+  "owner": { "name": "김의중" },
+  "plugins": [
+    {
+      "name": "sf-harness",
+      "source": "./sf-harness",
+      "description": "수업용 스마트 팩토리 에이전트 하네스 — 센서 신호 분석·의사결정. 커맨드·스크립트·스킬·훅",
+      "version": "0.1.0",
+      "category": "example"
+    }
+  ]
+}
