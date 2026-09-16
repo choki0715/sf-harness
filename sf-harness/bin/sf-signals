@@ -15,6 +15,8 @@
   signals/<EQUIPMENT>.csv   timestamp,sensor,value   (timestamp: YYYY-MM-DDTHH:MM:SS)
   maintenance_log.csv       equipment,date,type,note            (선택)
   work_orders.csv           id,created,equipment,action,when,reason,status   (선택)
+  decisions.csv             의사결정 제안 대장 (선택)
+  state.json                가상 시계·설비 상태 (선택 — 있으면 기준 시각으로 가상 시계를 쓴다)
 
 출력 형식: `KEY: value` 한 줄씩 (STATUS 라인).
   파싱하기 쉽고, 사람이 읽기도 쉽고, LLM 이 헷갈리지 않는다.
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import sys
 from datetime import datetime, timedelta
@@ -107,6 +110,28 @@ def load_last_maintenance(path: str) -> dict[str, datetime]:
             if eq not in last or d > last[eq]:
                 last[eq] = d
     return last
+
+
+def load_state(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except ValueError:
+        return {}
+
+
+def count_by_equipment(path: str, status: str) -> dict[str, int]:
+    count: dict[str, int] = {}
+    if not os.path.exists(path):
+        return count
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if (row.get("status") or "").strip() == status:
+                eq = (row.get("equipment") or "").strip()
+                count[eq] = count.get(eq, 0) + 1
+    return count
 
 
 def load_open_work_orders(path: str) -> dict[str, int]:
@@ -192,7 +217,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="설비 센서 신호를 사실로 뽑는다")
     ap.add_argument("plant", nargs="?", default=".", help="플랜트 데이터 디렉터리 (기본: 현재)")
     ap.add_argument("--window", type=int, default=60, help="분석 창(분). 기본 60")
-    ap.add_argument("--now", help="기준 시각 YYYY-MM-DDTHH:MM:SS (기본: 현재 시각). 테스트·재현용")
+    ap.add_argument("--now", help="기준 시각 YYYY-MM-DDTHH:MM:SS (기본: state.json 의 가상 시계, 없으면 현재 시각)")
     ap.add_argument("--stale-min", type=int, default=10, help="이 분 이상 새 샘플이 없으면 STALE 로 센다")
     ap.add_argument("--flat-n", type=int, default=15, help="마지막 N 샘플이 완전히 같으면 FLATLINE 으로 센다")
     args = ap.parse_args()
@@ -207,19 +232,28 @@ def main() -> int:
     if not os.path.isdir(sig_dir):
         die(f"signals/ 디렉터리가 없다: {plant}")
 
+    state = load_state(os.path.join(plant, "state.json"))
     try:
-        now = parse_ts(args.now) if args.now else datetime.now().replace(microsecond=0)
+        if args.now:
+            now, now_source = parse_ts(args.now), "--now"
+        elif state.get("clock"):
+            now, now_source = parse_ts(state["clock"]), "state.json"   # 가상 플랜트는 가상 시계를 쓴다
+        else:
+            now, now_source = datetime.now().replace(microsecond=0), "wall-clock"
     except ValueError:
-        die(f"--now 형식이 틀렸다 (YYYY-MM-DDTHH:MM:SS): {args.now}")
+        die(f"기준 시각 형식이 틀렸다 (YYYY-MM-DDTHH:MM:SS): {args.now or state.get('clock')}")
     window_start = now - timedelta(minutes=args.window)
 
     thresholds = load_thresholds(thr_path)
     last_maint = load_last_maintenance(os.path.join(plant, "maintenance_log.csv"))
     open_wo = load_open_work_orders(os.path.join(plant, "work_orders.csv"))
+    pending = count_by_equipment(os.path.join(plant, "decisions.csv"), "pending")
+    eq_states = state.get("equipment", {})
 
     print(f"SF_SIGNALS_PROTO: {PROTO}")            # 프로토콜 번호. 스킬이 이 줄로 버전을 확인한다
     print(f"PLANT_DIR: {plant}")
     print(f"NOW: {now.strftime(TS_FMT)}")
+    print(f"NOW_SOURCE: {now_source}")
     print(f"WINDOW_MIN: {args.window}")
     print(f"RULES: stale_min={args.stale_min} flat_n={args.flat_n}")
     print(f"EQUIPMENT_COUNT: {len(thresholds)}")
@@ -258,6 +292,9 @@ def main() -> int:
             print(f"{eq}.LAST_MAINT: none")
             print(f"{eq}.DAYS_SINCE_MAINT: none")
         print(f"{eq}.OPEN_WORK_ORDERS: {open_wo.get(eq, 0)}")
+        print(f"{eq}.PENDING_DECISIONS: {pending.get(eq, 0)}")
+        es = eq_states.get(eq, {})
+        print(f"{eq}.STATE: {es.get('status', 'unknown')} speed={es.get('speed', 'unknown')}")
 
         in_window = [r for r in rows if r[0] >= window_start]
         missing = []

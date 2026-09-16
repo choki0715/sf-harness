@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""sf-collect — 가상 센서에서 새 값을 받아 signals/ 에 추가한다 (프로세스 1단계: 수집).
+
+실제 공장이라면 이 자리에 PLC·OPC-UA·MQTT 수집기가 있다. 실습에서는 sf_virtual_plant 가
+가상 시계를 N분 앞으로 돌리며 값을 만든다. 이 스크립트는 판단하지 않는다.
+"몇 개를 받았고, 어느 설비가 조용했는가"까지만 사실로 출력한다.
+
+사용법:
+  sf-collect [플랜트 경로] [--minutes N]     기본 5분
+
+출력 형식: `KEY: value` (다른 스크립트와 같다). 마지막 줄 SF_COLLECT_OK.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import sf_virtual_plant as vp  # noqa: E402
+
+PROTO = 1
+
+
+def die(msg: str) -> None:
+    print(f"ERROR: {msg}")
+    raise SystemExit(1)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="가상 센서 데이터 수집")
+    ap.add_argument("plant", nargs="?", default=".")
+    ap.add_argument("--minutes", type=int, default=5, help="가상 시계를 몇 분 전진시키며 수집할지 (기본 5)")
+    args = ap.parse_args()
+
+    plant = os.path.abspath(args.plant or ".")
+    state = vp.load_state(plant)
+    if state is None:
+        die(f"state.json 이 없다: {plant} 는 가상 플랜트가 아니다 (sf-demo-data 로 만든다)")
+    if not os.path.isdir(os.path.join(plant, "signals")):
+        die(f"signals/ 디렉터리가 없다: {plant}")
+    if args.minutes < 1 or args.minutes > 1440:
+        die(f"--minutes 는 1~1440 사이여야 한다: {args.minutes}")
+
+    clock = vp.datetime.strptime(state["clock"], vp.TS_FMT)
+    t0 = vp.t_of(state, clock)
+
+    print(f"SF_COLLECT_PROTO: {PROTO}")
+    print(f"PLANT_DIR: {plant}")
+    print(f"CLOCK_BEFORE: {state['clock']}")
+    print(f"MINUTES: {args.minutes}")
+
+    total, silent_eq = 0, []
+    sensors_of = {eq: [s for e, s, *_ in vp.THRESHOLDS if e == eq] for eq in vp.EQUIPMENT}
+    for eq in vp.EQUIPMENT:
+        eq_state = state["equipment"].get(eq, {})
+        rows, reporting = [], set()
+        for t in range(t0, t0 + args.minutes):
+            ts = vp.ts_of(state, t).strftime(vp.TS_FMT)
+            for sensor, value in vp.readings(eq, t, eq_state):
+                rows.append((ts, sensor, value))
+                reporting.add(sensor)
+        if rows:
+            vp.append_rows(plant, eq, rows)
+        total += len(rows)
+        silent = [s for s in sensors_of[eq] if s not in reporting]
+        print(f"{eq}.STATE: {eq_state.get('status', 'running')} speed={eq_state.get('speed', 100)}")
+        print(f"{eq}.NEW_SAMPLES: {len(rows)}")
+        print(f"{eq}.SENSORS_REPORTING: {' '.join(s for s in sensors_of[eq] if s in reporting) or 'none'}")
+        print(f"{eq}.SENSORS_SILENT: {' '.join(silent) or 'none'}")
+        if not rows:
+            silent_eq.append(eq)
+
+    state["clock"] = vp.ts_of(state, t0 + args.minutes).strftime(vp.TS_FMT)
+    vp.save_state(plant, state)
+
+    print(f"CLOCK_AFTER: {state['clock']}")
+    print(f"TOTAL_NEW_SAMPLES: {total}")
+    print(f"SILENT_EQUIPMENT: {' '.join(silent_eq) or 'none'}")
+    print("SF_COLLECT_OK")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

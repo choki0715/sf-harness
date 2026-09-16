@@ -5,8 +5,8 @@
 #
 #   스킬(마크다운)은 테스트하기 어렵다 — 출력이 매번 다르니까.
 #   하지만 스크립트와 훅은 결정적이다. 결정적인 것은 전부 테스트한다.
-#   센서 통계를 스크립트로 뺐기 때문에 "CRIT 연속 12샘플"이 정확히 12인지 검증할 수 있다.
-#   LLM 에게 세게 했다면 이 테스트는 쓸 수 없었다.
+#   센서 통계를 스크립트로 뺐기 때문에 "CRIT 연속 12샘플"이 정확히 12인지 검증할 수 있고,
+#   가상 플랜트를 (설비, 분) 시드로 고정했기 때문에 "5분씩 두 번 = 10분 한 번"도 검증할 수 있다.
 #
 # 사용법:  ./test/run-tests.sh
 set -uo pipefail
@@ -14,7 +14,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/sf-harness/bin"
 GUARD="$ROOT/sf-harness/hooks/guard.py"
-NOW="2026-09-16T14:00:00"     # 기준 시각을 고정해야 STALE·DAYS_SINCE_MAINT 가 흔들리지 않는다
+NOW="2026-09-16T14:00:00"     # 가상 시계의 시작을 고정해야 STALE·DAYS_SINCE_MAINT 가 흔들리지 않는다
 
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf "  \033[32m✓\033[0m %s\n" "$1"; }
@@ -24,45 +24,51 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 PLANT="$TMP/plant"
 
+OUT=""
+field() { echo "$OUT" | grep -m1 "^$1:" | sed "s/^$1:[[:space:]]*//"; }
+check() {  # check <설명> <키> <기대값>   (OUT 에서 찾는다)
+  got="$(field "$2")"; [ "$got" = "$3" ] && ok "$1" || bad "$1" "$2=$3" "$2=$got"
+}
+contains() {  # contains <설명> <키> <부분문자열>
+  got="$(field "$2")"; case "$got" in *"$3"*) ok "$1" ;; *) bad "$1" "$2 에 $3" "$2=$got" ;; esac
+}
+is_error() {  # is_error <설명> <출력>
+  case "$2" in ERROR:*) ok "$1" ;; *) bad "$1" "ERROR: 로 시작" "$2" ;; esac
+}
+
 # ─── sf-demo-data ─────────────────────────────────────────────
 echo "sf-demo-data"
 OUT="$("$BIN/sf-demo-data" "$PLANT" --now "$NOW" 2>&1)"
-[ -f "$PLANT/config/thresholds.csv" ] && ok "thresholds.csv 생성" || bad "thresholds.csv" "있음" "없음"
-[ -f "$PLANT/signals/CNC-02.csv" ]    && ok "signals/*.csv 생성"  || bad "signals" "있음" "없음"
-[ -f "$PLANT/.sf-harness" ]           && ok "훅 범위 마커 생성"   || bad "마커" "있음" "없음"
-[ -f "$PLANT/.claude/settings.json" ] && ok "프로젝트 훅 등록"    || bad "settings.json" "있음" "없음"
+for f in config/thresholds.csv signals/CNC-02.csv maintenance_log.csv work_orders.csv decisions.csv state.json .sf-harness .claude/settings.json; do
+  [ -f "$PLANT/$f" ] && ok "$f 생성" || bad "$f" "있음" "없음"
+done
 python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$PLANT/.claude/settings.json" 2>/dev/null \
   && ok "settings.json 이 유효한 JSON" || bad "settings.json" "유효" "깨짐"
+[ "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['clock'])" "$PLANT/state.json")" = "$NOW" ] \
+  && ok "가상 시계가 --now 로 시작" || bad "clock" "$NOW" "다름"
+[ "$(tail -n +2 "$PLANT/signals/CNC-01.csv" | wc -l)" = 360 ] && ok "이력 120분 × 3센서 = 360행" || bad "이력" "360" "$(tail -n +2 "$PLANT/signals/CNC-01.csv" | wc -l)"
 OUT2="$("$BIN/sf-demo-data" "$PLANT" 2>&1)"
 case "$OUT2" in 이미\ 있다*) ok "이미 있으면 덮어쓰지 않는다" ;; *) bad "덮어쓰기 방지" "이미 있다" "$OUT2" ;; esac
+# 결정성: 같은 --now 로 두 번 만들면 파일이 같다
+"$BIN/sf-demo-data" "$TMP/plant2" --now "$NOW" >/dev/null 2>&1
+diff -rq "$PLANT/signals" "$TMP/plant2/signals" >/dev/null && ok "같은 시작 시각이면 이력이 완전히 같다" || bad "결정성" "동일" "다름"
 
-# ─── sf-signals ───────────────────────────────────────────────
+# ─── sf-signals (수집 전: t = 0) ──────────────────────────────
 echo
-echo "sf-signals"
-OUT="$("$BIN/sf-signals" "$PLANT" --now "$NOW" 2>&1)"
-field() { echo "$OUT" | grep -m1 "^$1:" | sed "s/^$1:[[:space:]]*//"; }
-check() {  # check <설명> <키> <기대값>
-  got="$(field "$2")"; [ "$got" = "$3" ] && ok "$1" || bad "$1" "$2=$3" "$2=$got"
-}
-checkge() {  # checkge <설명> <키> <최소>
-  got="$(field "$2")"; [ -n "$got" ] && [ "$got" != none ] && [ "$got" -ge "$3" ] 2>/dev/null \
-    && ok "$1" || bad "$1" "$2>=$3" "$2=$got"
-}
-contains() {  # contains <설명> <키> <부분문자열>
-  got="$(field "$2")"; case " $got " in *" $3 "*|*"$3"*) ok "$1" ;; *) bad "$1" "$2 에 $3" "$2=$got" ;; esac
-}
-
+echo "sf-signals  (수집 전, 가상 시계 $NOW)"
+OUT="$("$BIN/sf-signals" "$PLANT" 2>&1)"
 check   "봉투 시작"                       SF_SIGNALS_PROTO 1
 echo "$OUT" | grep -q "^SF_SIGNALS_OK$" && ok "봉투 끝 (SF_SIGNALS_OK)" || bad "봉투 끝" "SF_SIGNALS_OK" "없음"
+check   "기준 시각 = 가상 시계 (--now 없이)" NOW "$NOW"
+check   "기준 시각 출처 표시"             NOW_SOURCE state.json
 check   "설비 수"                         EQUIPMENT_COUNT 4
-check   "기준 시각 고정"                  NOW "$NOW"
 check   "파싱 오류 없음"                  PARSE_ERRORS 0
-# CNC-02: 지금 세워야 하는 설비
+check   "설비 상태 표시"                  CNC-02.STATE "running speed=100"
+check   "대기 중 제안 0"                  CNC-02.PENDING_DECISIONS 0
+# CNC-02: 위험
 check   "CNC-02 진동 마지막 샘플 CRIT"     CNC-02.vibration.STATUS CRIT
 check   "CNC-02 진동 CRIT 연속 12"         CNC-02.vibration.CRIT_STREAK 12
-check   "CNC-02 진동 CRIT 개수 12"         CNC-02.vibration.OVER_CRIT 12
 check   "CNC-02 온도 WARN 진입"            CNC-02.temperature.STATUS WARN
-checkge "CNC-02 온도 WARN 연속 ≥ 3"        CNC-02.temperature.WARN_STREAK 3
 check   "CNC-02 이미 넘었으면 MIN_TO_WARN 0" CNC-02.vibration.MIN_TO_WARN 0
 # CNC-01: 추세와 일시 스파이크
 check   "CNC-01 온도 아직 OK"              CNC-01.temperature.STATUS OK
@@ -71,7 +77,6 @@ m="$(field CNC-01.temperature.MIN_TO_WARN)"
 [ "$m" != none ] && [ "$m" -gt 30 ] && [ "$m" -lt 120 ] && ok "CNC-01 온도 30~120분 뒤 WARN (외삽)" || bad "MIN_TO_WARN" "30~120" "$m"
 check   "CNC-01 전류 스파이크 1회"         CNC-01.current.OVER_CRIT 1
 check   "CNC-01 전류 연속 CRIT 는 0"       CNC-01.current.CRIT_STREAK 0
-check   "CNC-01 전류 마지막 샘플은 OK"     CNC-01.current.STATUS OK
 check   "CNC-01 정비 45일 경과"            CNC-01.DAYS_SINCE_MAINT 45
 # PRESS-01: 센서 문제
 check   "PRESS-01 압력 FLATLINE"           PRESS-01.pressure.FLATLINE 1
@@ -79,67 +84,137 @@ check   "PRESS-01 압력 STATUS 는 그대로 OK (판단은 스킬이)" PRESS-01
 check   "PRESS-01 cycle_time NO_DATA"      PRESS-01.cycle_time.STATUS NO_DATA
 check   "PRESS-01 누락 센서 목록"          PRESS-01.MISSING_SENSORS cycle_time
 check   "PRESS-01 열린 작업지시 1"         PRESS-01.OPEN_WORK_ORDERS 1
-check   "PRESS-01 정비 70일 경과"          PRESS-01.DAYS_SINCE_MAINT 70
 # CONV-01: 데이터 끊김
 check   "CONV-01 45분째 데이터 없음"       CONV-01.STALE_MIN 45
-check   "CONV-01 끊긴 설비는 MISSING 으로 중복 보고 안 함" CONV-01.MISSING_SENSORS none
+check   "끊긴 설비는 MISSING 으로 중복 보고 안 함" CONV-01.MISSING_SENSORS none
 # 요약
 check    "ALERT_CRIT"                     ALERT_CRIT "CNC-02.vibration"
 check    "ALERT_WARN"                     ALERT_WARN "CNC-02.temperature"
 contains "SENSOR_SUSPECT 에 FLATLINE"     SENSOR_SUSPECT "PRESS-01.pressure(FLATLINE)"
 contains "SENSOR_SUSPECT 에 MISSING"      SENSOR_SUSPECT "PRESS-01.cycle_time(MISSING)"
 check    "STALE_EQUIPMENT"                STALE_EQUIPMENT "CONV-01"
-
-# 창 크기를 바꾸면 샘플 수가 바뀐다
-OUT30="$("$BIN/sf-signals" "$PLANT" --now "$NOW" --window 30 2>&1)"
-n60="$(field SAMPLE_COUNT)"; n30="$(echo "$OUT30" | grep -m1 '^SAMPLE_COUNT:' | sed 's/.*: //')"
-[ "$n30" -lt "$n60" ] && ok "--window 30 이면 샘플이 준다 ($n60 → $n30)" || bad "window" "$n30 < $n60" "$n30"
-
+# --now 를 주면 가상 시계보다 우선한다
+O="$("$BIN/sf-signals" "$PLANT" --now 2026-09-16T13:30:00 2>&1 | grep -m1 '^NOW_SOURCE:')"
+[ "$O" = "NOW_SOURCE: --now" ] && ok "--now 가 가상 시계보다 우선" || bad "--now 우선" "--now" "$O"
 # 오류 경로 — 파이프에 넣지 말고 먼저 받아둔다 (exit 1 이 pipefail 을 건드린다)
-E="$("$BIN/sf-signals" "$TMP/없는경로" 2>&1)"; case "$E" in ERROR:*) ok "없는 경로면 ERROR" ;; *) bad "없는 경로" "ERROR:" "$E" ;; esac
+is_error "없는 경로면 ERROR"          "$("$BIN/sf-signals" "$TMP/없는경로" 2>&1)"
 mkdir -p "$TMP/empty"
-E="$("$BIN/sf-signals" "$TMP/empty" 2>&1)";   case "$E" in ERROR:*) ok "thresholds.csv 없으면 ERROR" ;; *) bad "빈 디렉터리" "ERROR:" "$E" ;; esac
-E="$("$BIN/sf-signals" "$PLANT" --now "16/09/2026" 2>&1)"; case "$E" in ERROR:*) ok "--now 형식 오류면 ERROR" ;; *) bad "now 형식" "ERROR:" "$E" ;; esac
+is_error "thresholds.csv 없으면 ERROR" "$("$BIN/sf-signals" "$TMP/empty" 2>&1)"
+is_error "--now 형식 오류면 ERROR"    "$("$BIN/sf-signals" "$PLANT" --now "16/09/2026" 2>&1)"
 
-# ─── sf-actuate ───────────────────────────────────────────────
+# ─── sf-collect (1단계: 수집) ─────────────────────────────────
+echo
+echo "sf-collect"
+OUT="$("$BIN/sf-collect" "$PLANT" --minutes 5 2>&1)"
+check "봉투 시작"                  SF_COLLECT_PROTO 1
+echo "$OUT" | grep -q "^SF_COLLECT_OK$" && ok "봉투 끝 (SF_COLLECT_OK)" || bad "봉투 끝" "SF_COLLECT_OK" "없음"
+check "수집 전 시계"               CLOCK_BEFORE "$NOW"
+check "수집 후 시계 +5분"          CLOCK_AFTER "2026-09-16T14:05:00"
+check "CNC-01 5분 × 3센서 = 15"     CNC-01.NEW_SAMPLES 15
+check "PRESS-01 cycle_time 은 조용" PRESS-01.SENSORS_SILENT cycle_time
+check "CONV-01 은 아직 끊김"        CONV-01.NEW_SAMPLES 0
+check "조용한 설비 목록"           SILENT_EQUIPMENT CONV-01
+check "총 샘플 (15+15+10+0)"        TOTAL_NEW_SAMPLES 40
+[ "$(tail -n +2 "$PLANT/signals/CNC-01.csv" | wc -l)" = 375 ] && ok "signals/ 에 추가됐다 (360 → 375)" || bad "append" "375" "$(tail -n +2 "$PLANT/signals/CNC-01.csv" | wc -l)"
+head -1 "$PLANT/signals/CNC-01.csv" | grep -q "^timestamp,sensor,value$" && ok "헤더는 한 번만" || bad "헤더" "1" "다름"
+
+# 수집 후 분석: 시계가 움직였고, CRIT 연속이 늘었다
+OUT="$("$BIN/sf-signals" "$PLANT" 2>&1)"
+check "sf-signals 기준 시각도 5분 전진"   NOW "2026-09-16T14:05:00"
+check "CNC-02 CRIT 연속 12 → 17"          CNC-02.vibration.CRIT_STREAK 17
+check "CONV-01 STALE 45 → 50"             CONV-01.STALE_MIN 50
+
+# 결정성: 5분 + 5분 == 10분 한 번
+"$BIN/sf-collect" "$PLANT" --minutes 5 >/dev/null
+"$BIN/sf-collect" "$TMP/plant2" --minutes 10 >/dev/null
+diff -q "$PLANT/signals/CNC-02.csv" "$TMP/plant2/signals/CNC-02.csv" >/dev/null && ok "5분 두 번 = 10분 한 번 (누가 언제 수집해도 같은 값)" || bad "결정성" "동일" "다름"
+
+# 30분 지나면 CONV-01 이 돌아온다 (t = +30 부터)
+"$BIN/sf-collect" "$PLANT" --minutes 25 >/dev/null     # 시계 14:35 → t = 35
+OUT="$("$BIN/sf-signals" "$PLANT" 2>&1)"
+check "CONV-01 데이터 복귀 → STALE 해소"   CONV-01.STALE_MIN 1
+check "STALE_EQUIPMENT 비었다"             STALE_EQUIPMENT none
+# CNC-01 두 번째 스파이크 (t = 25) 가 창 안에 들어왔다
+check "CNC-01 전류 스파이크 반복 (창 안 1회 — 첫 스파이크는 창 밖)" CNC-01.current.OVER_CRIT 1
+# 오류 경로
+is_error "가상 플랜트가 아니면 ERROR"   "$("$BIN/sf-collect" "$TMP/empty" 2>&1)"
+is_error "--minutes 0 은 ERROR"        "$("$BIN/sf-collect" "$PLANT" --minutes 0 2>&1)"
+
+# ─── sf-actuate (3단계: 제안 → 사람의 결정) ───────────────────
 echo
 echo "sf-actuate"
+CLK="2026-09-16T14:35:00"
 A="$("$BIN/sf-actuate" --plant "$PLANT" list 2>&1)"
-echo "$A" | grep -q "^OPEN_WORK_ORDERS: 1$" && ok "list: 열린 작업지시 1" || bad "list" "OPEN_WORK_ORDERS: 1" "$A"
+echo "$A" | grep -q "^PENDING_DECISIONS: 0$" && ok "list: 대기 중 제안 0" || bad "list" "PENDING 0" "$A"
+echo "$A" | grep -q "^OPEN_WORK_ORDERS: 1$" && ok "list: 열린 작업지시 1" || bad "list" "WO 1" "$A"
+echo "$A" | grep -q "^CLOCK: $CLK$" && ok "list: 가상 시계 표시" || bad "list clock" "$CLK" "$A"
 
-E="$("$BIN/sf-actuate" --plant "$PLANT" --now "$NOW" schedule-maintenance CNC-01 --when next-shift --reason "" 2>&1)"
-case "$E" in ERROR:*) ok "근거(--reason) 없으면 기록하지 않는다" ;; *) bad "reason 필수" "ERROR:" "$E" ;; esac
-E="$("$BIN/sf-actuate" --plant "$PLANT" --now "$NOW" schedule-maintenance CNC-99 --when next-shift --reason x 2>&1)"
-case "$E" in ERROR:*) ok "모르는 설비면 ERROR" ;; *) bad "모르는 설비" "ERROR:" "$E" ;; esac
-E="$("$BIN/sf-actuate" --plant "$PLANT" --now "$NOW" schedule-maintenance CNC-01 --when 내일 --reason x 2>&1)"
-case "$E" in ERROR:*) ok "--when 형식 오류면 ERROR" ;; *) bad "when 형식" "ERROR:" "$E" ;; esac
+is_error "근거(--reason) 없으면 기록하지 않는다" "$("$BIN/sf-actuate" --plant "$PLANT" propose CNC-02 stop --reason "" 2>&1)"
+is_error "모르는 설비면 ERROR"                  "$("$BIN/sf-actuate" --plant "$PLANT" propose CNC-99 stop --reason x 2>&1)"
+is_error "예약 제안에 --when 없으면 ERROR"      "$("$BIN/sf-actuate" --plant "$PLANT" propose CNC-01 schedule-maintenance --reason x 2>&1)"
+is_error "감속 제안 50% 미만은 ERROR"           "$("$BIN/sf-actuate" --plant "$PLANT" propose CNC-01 set-speed --percent 20 --reason x 2>&1)"
 
-A="$("$BIN/sf-actuate" --plant "$PLANT" --now "$NOW" schedule-maintenance CNC-01 --when next-shift --reason "온도 +4.05 C/h, 61분 뒤 warn" 2>&1)"
-echo "$A" | grep -q "^WORK_ORDER: WO-0002$" && ok "작업지시 발행 → WO-0002 (기존 다음 번호)" || bad "발행" "WO-0002" "$A"
-echo "$A" | grep -q "^SF_ACTUATE_OK$" && ok "봉투 끝 (SF_ACTUATE_OK)" || bad "봉투" "OK" "$A"
-# 사유에 쉼표가 있으면 CSV 가 따옴표로 감싼다 — 그래서 끝의 ,open 만 본다
-grep -q "^WO-0002,.*,CNC-01,schedule-maintenance,next-shift,.*open$" "$PLANT/work_orders.csv" \
-  && ok "work_orders.csv 에 기록" || bad "csv 기록" "WO-0002 open" "$(cat "$PLANT/work_orders.csv")"
-grep -q "schedule-maintenance	CNC-01" "$PLANT/actions.log" && ok "actions.log 에 남는다" || bad "actions.log" "기록" "없음"
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" propose CNC-02 stop --reason "vibration CRIT_STREAK 12, temperature WARN 동반" 2>&1)"
+check "정지 제안 → DEC-0001"        DECISION DEC-0001
+check "제안은 pending"              STATUS pending
+contains "승인 명령을 알려준다"      HUMAN_APPROVE "approve DEC-0001"
+echo "$OUT" | grep -q "^SF_ACTUATE_OK$" && ok "봉투 끝" || bad "봉투" "OK" "$OUT"
+grep -q "^DEC-0001,.*,CNC-02,stop,,.*,pending,,$" "$PLANT/decisions.csv" && ok "decisions.csv 에 기록" || bad "csv" "DEC-0001 pending" "$(cat "$PLANT/decisions.csv")"
+[ "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['equipment']['CNC-02']['status'])" "$PLANT/state.json")" = running ] \
+  && ok "제안만으로는 설비가 서지 않는다" || bad "propose 부작용" "running" "stopped"
+is_error "같은 제안 중복은 ERROR" "$("$BIN/sf-actuate" --plant "$PLANT" propose CNC-02 stop --reason x 2>&1)"
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" propose CNC-01 schedule-maintenance --when next-shift --reason "temperature +4/h, 정비 45일" 2>&1)"
+check "예약 제안 → DEC-0002"        DECISION DEC-0002
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" propose CNC-01 recheck --reason "current 스파이크 1회" 2>&1)"
+check "재확인 제안 → DEC-0003"      DECISION DEC-0003
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" propose CNC-01 set-speed --percent 80 --reason "온도 상승" 2>&1)"
+check "감속 제안 → DEC-0004"        DECISION DEC-0004
+S="$("$BIN/sf-signals" "$PLANT" 2>&1 | grep -m1 '^CNC-01.PENDING_DECISIONS:')"
+[ "$S" = "CNC-01.PENDING_DECISIONS: 3" ] && ok "sf-signals 가 대기 중 제안을 센다" || bad "연동" "3" "$S"
 
-S="$("$BIN/sf-signals" "$PLANT" --now "$NOW" 2>&1 | grep -m1 '^CNC-01.OPEN_WORK_ORDERS:')"
-[ "$S" = "CNC-01.OPEN_WORK_ORDERS: 1" ] && ok "sf-signals 가 새 작업지시를 센다" || bad "연동" "1" "$S"
+# 사람의 결정
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" approve DEC-0001 2>&1)"
+check "승인 → 실행"                 EXECUTED stop
+check "승인 상태"                   STATUS approved
+[ "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['equipment']['CNC-02']['status'])" "$PLANT/state.json")" = stopped ] \
+  && ok "승인하면 설비 상태가 stopped" || bad "state" "stopped" "running"
+grep -q "	stop	CNC-02	via=DEC-0001	" "$PLANT/actions.log" && ok "actions.log 에 어느 제안으로 실행됐는지 남는다" || bad "log" "via=DEC-0001" "$(cat "$PLANT/actions.log")"
+is_error "이미 결정된 제안은 다시 못 한다" "$("$BIN/sf-actuate" --plant "$PLANT" approve DEC-0001 2>&1)"
+is_error "없는 제안은 ERROR"              "$("$BIN/sf-actuate" --plant "$PLANT" approve DEC-9999 2>&1)"
+is_error "기각에는 --reason 필수"          "$("$BIN/sf-actuate" --plant "$PLANT" reject DEC-0002 2>&1 | head -1 | sed 's/^usage.*/ERROR: usage/')"
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" reject DEC-0004 --reason "생산 일정상 감속 불가" 2>&1)"
+check "기각"                        STATUS rejected
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" approve DEC-0002 2>&1)"
+contains "예약 승인 → 작업지시 발행"  EXECUTED "schedule-maintenance WO-0002"
+grep -q "^WO-0002,.*,CNC-01,schedule-maintenance,next-shift,.*open$" "$PLANT/work_orders.csv" && ok "work_orders.csv 에 WO-0002" || bad "WO" "WO-0002" "$(cat "$PLANT/work_orders.csv")"
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" approve DEC-0003 2>&1)"
+contains "재확인 승인은 설비에 아무것도 안 한다" EXECUTED recheck
+A="$("$BIN/sf-actuate" --plant "$PLANT" list 2>&1)"
+echo "$A" | grep -q "^PENDING_DECISIONS: 0$" && ok "전부 결정되면 대기 0" || bad "list" "0" "$A"
+echo "$A" | grep -q "^CNC-02.STATE: stopped" && ok "list 에 정지 상태" || bad "list state" "stopped" "$A"
 
-A="$("$BIN/sf-actuate" --plant "$PLANT" --now "$NOW" cancel WO-0002 --reason "오탐" 2>&1)"
-echo "$A" | grep -q "^STATUS: cancelled$" && ok "작업지시는 되돌릴 수 있다 (cancel)" || bad "cancel" "cancelled" "$A"
-E="$("$BIN/sf-actuate" --plant "$PLANT" cancel WO-0002 --reason x 2>&1)"
-case "$E" in ERROR:*) ok "이미 취소된 것은 다시 취소 못 한다" ;; *) bad "중복 취소" "ERROR:" "$E" ;; esac
+# 승인한 조치가 다음 수집에 반영된다 (루프가 닫힌다)
+"$BIN/sf-collect" "$PLANT" --minutes 20 >/dev/null
+OUT="$("$BIN/sf-signals" "$PLANT" 2>&1)"
+check "정지한 설비는 사실에도 stopped"     CNC-02.STATE "stopped speed=100"
+check "정지 후 진동 값이 OK 로 내려온다"   CNC-02.vibration.STATUS OK
+check "정지 후 CRIT 연속 0"                CNC-02.vibration.CRIT_STREAK 0
+S="$(field CNC-02.vibration.LAST)"; python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) < 0.5 else 1)" "$S" && ok "정지 후 진동 ≈ 0 ($S)" || bad "idle" "<0.5" "$S"
 
-E="$("$BIN/sf-actuate" --plant "$PLANT" set-speed CNC-01 20 --reason x 2>&1)"
-case "$E" in ERROR:*) ok "set-speed 50% 미만은 거부 (정지와 같다)" ;; *) bad "speed 범위" "ERROR:" "$E" ;; esac
-A="$("$BIN/sf-actuate" --plant "$PLANT" --now "$NOW" set-speed CNC-01 80 --reason "온도 상승" 2>&1)"
-echo "$A" | grep -q "^PERCENT: 80$" && ok "set-speed 80% 기록" || bad "set-speed" "80" "$A"
+# 직접 실행 명령 (사람용) 과 되돌리기
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" set-speed CNC-01 80 --reason "온도 상승" 2>&1)"
+check "감속 직접 실행"              PERCENT 80
+"$BIN/sf-collect" "$PLANT" --minutes 5 >/dev/null
+OUT="$("$BIN/sf-signals" "$PLANT" 2>&1)"
+check "감속이 상태에 반영"          CNC-01.STATE "running speed=80"
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" cancel WO-0002 --reason "오탐" 2>&1)"
+check "작업지시는 되돌릴 수 있다 (cancel)" STATUS cancelled
+is_error "이미 취소된 것은 다시 취소 못 한다" "$("$BIN/sf-actuate" --plant "$PLANT" cancel WO-0002 --reason x 2>&1)"
+is_error "set-speed 50% 미만은 거부"          "$("$BIN/sf-actuate" --plant "$PLANT" set-speed CNC-01 20 --reason x 2>&1)"
+OUT="$("$BIN/sf-actuate" --plant "$PLANT" --now "$CLK" stop PRESS-01 --reason "긴급" 2>&1)"
+check "stop 직접 실행 (사람이 치면 된다 — 훅은 에이전트에만)" REVERSIBLE "no  (재가동은 현장 승인 후 별도 절차)"
 
-A="$("$BIN/sf-actuate" --plant "$PLANT" --now "$NOW" stop CNC-02 --reason "진동 CRIT 연속 12" 2>&1)"
-echo "$A" | grep -q "^REVERSIBLE: no" && ok "stop 은 사람이 실행하면 기록된다 (훅은 에이전트에만)" || bad "stop" "REVERSIBLE: no" "$A"
-[ "$(grep -c '	stop	' "$PLANT/actions.log")" = 1 ] && ok "actions.log 는 추가만 한다" || bad "append" "1" "$(cat "$PLANT/actions.log")"
-
-# ─── guard.py ─────────────────────────────────────────────────
+# ─── guard.py (4단계: 훅) ─────────────────────────────────────
 echo
 echo "guard.py  (플랜트 디렉터리 안 = 훅 대상)"
 cd "$PLANT"
@@ -154,23 +229,27 @@ gf() {  # gf <설명> <DENY|PASS> <도구> <file_path>
   [ "$got" = "$2" ] && ok "$1" || bad "$1" "$2" "$got"
 }
 
+g "승인은 사람만"                     DENY "sf-actuate approve DEC-0001"
+g "기각도 사람만"                     DENY "sf-actuate reject DEC-0001 --reason x"
+g "옵션 뒤의 approve 도 잡는다"       DENY "sf-actuate --plant /tmp/x approve DEC-0001"
 g "설비 정지"                         DENY "sf-actuate stop CNC-02 --reason '진동 CRIT'"
-g "옵션 뒤의 stop 도 잡는다"          DENY "sf-actuate --plant /tmp/x stop CNC-02 --reason x"
 g "절대 경로 sf-actuate"              DENY "$BIN/sf-actuate stop CNC-02 --reason x"
 g "&& 뒤의 stop 도 잡는다"            DENY "cd /tmp && sf-actuate stop CNC-02 --reason x"
 g "emergency-stop"                    DENY "sf-actuate emergency-stop CNC-02 --reason x"
-g "작업지시 발행은 통과 (되돌릴 수 있다)" PASS "sf-actuate schedule-maintenance CNC-01 --when next-shift --reason '온도 상승'"
-g "reason 에 stop 이 있어도 통과"      PASS "sf-actuate schedule-maintenance CNC-01 --when next-shift --reason 'stop 전에 점검'"
+g "제안은 통과 (에이전트의 산출물)"   PASS "sf-actuate propose CNC-02 stop --reason '진동 CRIT 연속 12'"
+g "reason 에 approve/stop 이 있어도 통과" PASS "sf-actuate propose CNC-01 recheck --reason 'approve 전에 stop 여부 재확인'"
+g "작업지시 직접 발행은 통과 (되돌릴 수 있다)" PASS "sf-actuate schedule-maintenance CNC-01 --when next-shift --reason x"
 g "속도 저감은 통과"                  PASS "sf-actuate set-speed CNC-01 80 --reason x"
 g "list 는 통과"                      PASS "sf-actuate list"
-g "따옴표 안 문자열은 통과"           PASS "echo 'sf-actuate stop 예시'"
+g "수집은 통과"                       PASS "sf-collect . --minutes 5"
+g "따옴표 안 문자열은 통과"           PASS "echo 'sf-actuate approve 예시'"
 g "원본 로그 삭제"                    DENY "rm signals/CNC-02.csv"
 g "원본 로그 디렉터리 삭제"           DENY "rm -rf $PLANT/signals"
 g "원본 로그 이동"                    DENY "mv signals/CNC-02.csv /tmp/"
 g "원본 로그 덮어쓰기 (>)"            DENY "python3 clean.py > signals/CNC-02.csv"
 g "원본 로그 이어쓰기 (>>)"           DENY "echo x >> signals/CNC-02.csv"
 g "원본 로그 읽기는 통과"             PASS "head signals/CNC-02.csv"
-g "다른 파일 삭제는 통과"             PASS "rm output/report.md"
+g "소견서 쓰기는 통과"                PASS "cat > reports/analysis.md"
 g "비슷한 이름은 통과 (my_signals)"   PASS "rm my_signals.txt"
 g "한계값 sed -i 수정"                DENY "sed -i 's/7.1/9.0/' config/thresholds.csv"
 g "한계값 덮어쓰기"                   DENY "cat new.csv > config/thresholds.csv"
@@ -179,24 +258,20 @@ g "한계값 읽기는 통과"                PASS "cat config/thresholds.csv"
 g "stderr 리다이렉트는 통과 (2>)"     PASS "sf-signals . 2> signals_err.log"
 gf "Write 로 한계값 편집"             DENY Write "$PLANT/config/thresholds.csv"
 gf "Edit 로 원본 로그 편집"           DENY Edit  "$PLANT/signals/CNC-01.csv"
-gf "Write 로 보고서 작성은 통과"      PASS Write "$PLANT/report.md"
+gf "Write 로 소견서 작성은 통과"      PASS Write "$PLANT/reports/analysis.md"
 gf "Read 도구는 검사 안 함"           PASS Read  "$PLANT/config/thresholds.csv"
 
 out="$(echo 'not json' | python3 "$GUARD")"
 [ -z "$out" ] && ok "깨진 입력은 통과 (fail-open)" || bad "깨진 입력" "PASS" "DENY"
-
-# 막을 때 이유를 준다 — 이유 없이 막으면 LLM 은 같은 명령을 조금 바꿔 다시 시도한다
-out="$(python3 -c 'import json; print(json.dumps({"tool_name":"Bash","tool_input":{"command":"sf-actuate stop CNC-02 --reason x"}}))' | python3 "$GUARD")"
-echo "$out" | grep -q "운영자" && ok "차단 사유에 '누가 실행하는지'가 있다" || bad "사유" "운영자 언급" "$out"
+out="$(python3 -c 'import json; print(json.dumps({"tool_name":"Bash","tool_input":{"command":"sf-actuate approve DEC-0001"}}))' | python3 "$GUARD")"
+echo "$out" | grep -q "운영자" && ok "차단 사유에 '누가 결정하는지'가 있다" || bad "사유" "운영자 언급" "$out"
 
 # 범위 밖에서는 아무것도 하지 않는다 (실무 저장소를 막지 않기 위해)
 cd "$TMP"
-g "마커 없으면 stop 도 통과"          PASS "sf-actuate stop CNC-02 --reason x"
+g "마커 없으면 approve 도 통과"       PASS "sf-actuate approve DEC-0001"
 g "마커 없으면 rm signals 도 통과"    PASS "rm -rf signals"
 SF_HARNESS_GUARD=1 g "환경변수로 켜면 다시 막힌다" DENY "sf-actuate stop CNC-02 --reason x"
-# cwd 는 밖이지만 편집 대상 파일이 플랜트 안이면 막는다
 gf "cwd 밖이어도 플랜트 파일 편집은 막는다" DENY Write "$PLANT/config/thresholds.csv"
-# hook 입력의 cwd 필드도 본다 (Claude Code 가 넘겨준다)
 out="$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","cwd":sys.argv[1],"tool_input":{"command":"rm signals/x.csv"}}))' "$PLANT" | python3 "$GUARD")"
 [ -n "$out" ] && ok "입력 JSON 의 cwd 로 범위를 판단한다" || bad "cwd 필드" "DENY" "PASS"
 

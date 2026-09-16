@@ -1,5 +1,5 @@
 ---
-description: 실습용 플랜트 데이터를 만든다 (수업 준비)
+description: 실습용 가상 플랜트를 만든다 (수업 준비)
 argument-hint: [경로] (생략하면 /tmp/sf-demo)
 allowed-tools: Bash
 ---
